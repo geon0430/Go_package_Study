@@ -22,13 +22,13 @@ func main() {
 		return
 	}
 	defer img.Close()
-
-  DownloadedMat := gocv.NewMat()
-  defer DownloadedMat.Close()
-  
+	
+	DownloadedMat := gocv.NewMat()
+  	defer DownloadedMat.Close()
+	
 	gpuMat, resizedGpuMat := cuda.NewGpuMat(), cuda.NewGpuMat()
-  defer gpuMat.Close()
-  defer resizedGpuMat.Close()
+  	defer gpuMat.Close()
+ 	 defer resizedGpuMat.Close()
 
 	stream := cuda.NewStream()
 	defer stream.Close()
@@ -37,8 +37,8 @@ func main() {
 	gpuMat.Upload(img)
 
 	cuda.ResizeWithStream(gpuMat, &resizedGpuMat, image.Pt(in_weight, in_height), 0, 0, cuda.InterpolationLinear, stream)
-
-  resizedGpuMat.DownloadWithStream(&DownloadedMat, stream)
+	
+	resizedGpuMat.DownloadWithStream(&DownloadedMat, stream)
 
 	gocv.IMWrite("output_image.jpg", DownloadedMat)
 
