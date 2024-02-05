@@ -1,3 +1,24 @@
+package util
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/sirupsen/logrus"
+)
+
+// incrementLogFileName 테스트
+func TestIncrementLogFileName(t *testing.T) {
+	basePath := "/tmp/log_test_go.log"
+	expected := "/tmp/log_test_go_1.log"
+	actual := incrementLogFileName(basePath, 1)
+
+	if actual != expected {
+		t.Errorf("Expected %s, got %s", expected, actual)
+	}
+}
+
 func rotateLogFileOnce(logger *logrus.Logger, file *os.File, basePath string, maxSizeMB int64) {
 	// 로그 파일 크기를 가져옵니다.
 	fileInfo, err := os.Stat(basePath)
