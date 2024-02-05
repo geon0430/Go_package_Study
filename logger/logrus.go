@@ -32,9 +32,8 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	return []byte(msg), nil
 }
 
-func SetupLogging(logPath, model, name, logLevel, pipelineID string) *logrus.Logger {
+func SetupLogging(logPath, logLevel, name string) *logrus.Logger {
 	logLevel = strings.ToUpper(logLevel)
-	//default
 	if logPath == "" {
 		logPath = "/tmp/log"
 	}
@@ -44,7 +43,7 @@ func SetupLogging(logPath, model, name, logLevel, pipelineID string) *logrus.Log
 		logrus.Fatalf("Failed to create log directory: %v", err)
 	}
 
-	logFileName := fmt.Sprintf("%s_%s_%s_go.log", name, pipelineID, logLevel)
+	logFileName := fmt.Sprintf("%s_%s_go.log", name, logLevel)
 	logFilePath := filepath.Join(logDir, logFileName)
 
 	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
@@ -57,6 +56,7 @@ func SetupLogging(logPath, model, name, logLevel, pipelineID string) *logrus.Log
 	logger.SetFormatter(new(CustomFormatter))
 	logger.SetReportCaller(true)
 
+	// Setup log level
 	switch logLevel {
 	case "DEBUG":
 		logger.SetLevel(logrus.DebugLevel)
@@ -72,6 +72,7 @@ func SetupLogging(logPath, model, name, logLevel, pipelineID string) *logrus.Log
 		logger.SetLevel(logrus.InfoLevel)
 	}
 
+	// Log file rotation
 	go rotateLogFile(logger, file, logFilePath, 10)
 
 	return logger
@@ -169,3 +170,4 @@ func resetFileIndexIfNecessary(currentIndex, maxIndex int) int {
 	}
 	return currentIndex + 1
 }
+
