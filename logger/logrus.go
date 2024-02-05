@@ -34,15 +34,12 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 
 func SetupLogging(logPath, model, name, logLevel, pipelineID string) *logrus.Logger {
 	logLevel = strings.ToUpper(logLevel)
-
+	//default
 	if logPath == "" {
 		logPath = "/tmp/log"
 	}
 	logDir := filepath.Join(logPath, name)
 
-	// if _, err := os.Stat(logDir); !os.IsNotExist(err) {
-	// 	os.RemoveAll(logDir)
-	// }
 	if err := os.MkdirAll(logDir, 0750); err != nil {
 		logrus.Fatalf("Failed to create log directory: %v", err)
 	}
@@ -115,7 +112,6 @@ func parseLogIndex(fileName string) (int, error) {
 	}
 	return 0, fmt.Errorf("log file name does not contain index")
 }
-
 func rotateLogFile(logger *logrus.Logger, file *os.File, basePath string, maxSizeMB int64) {
 	maxIndex := 10
 
@@ -133,13 +129,21 @@ func rotateLogFile(logger *logrus.Logger, file *os.File, basePath string, maxSiz
 		if fileInfo.Size() > maxSizeMB*1024*1024 {
 			file.Close()
 
-			fileIndex = resetFileIndexIfNecessary(fileIndex, maxIndex)
-			if fileIndex == 0 {
-				os.Remove(incrementLogFileName(basePath, 0))
+			for i := maxIndex - 1; i >= 0; i-- {
+				oldPath := incrementLogFileName(basePath, i)
+				newPath := incrementLogFileName(basePath, i+1)
+				if _, err := os.Stat(oldPath); err == nil {
+					if i == (maxIndex - 1) {
+						os.Remove(oldPath)
+					} else {
+						os.Rename(oldPath, newPath)
+					}
+				}
 			}
 
-			newPath := incrementLogFileName(basePath, fileIndex)
-			newFile, err := os.OpenFile(newPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+			os.Rename(basePath, incrementLogFileName(basePath, 1))
+
+			newFile, err := os.OpenFile(basePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 			if err != nil {
 				logger.Fatalf("Failed to open new log file: %v", err)
 			}
@@ -149,6 +153,7 @@ func rotateLogFile(logger *logrus.Logger, file *os.File, basePath string, maxSiz
 		}
 	}
 }
+
 func incrementLogFileName(basePath string, index int) string {
 	dir, file := filepath.Split(basePath)
 	ext := filepath.Ext(file)
