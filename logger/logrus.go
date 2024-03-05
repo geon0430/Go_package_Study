@@ -1,16 +1,16 @@
 package util
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"strconv"
 	"time"
-	"context"
 
 	"github.com/sirupsen/logrus"
 )
+
 
 type CustomFormatter struct{}
 
@@ -30,34 +30,76 @@ func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
 	return []byte(msg), nil
 }
 
+type InfoHook struct {
+	logger *logrus.Logger
+}
+
+func (hook *InfoHook) Fire(entry *logrus.Entry) error {
+	if entry.Level <= logrus.InfoLevel {
+		hook.logger.WithFields(entry.Data).Log(entry.Level, entry.Message)
+	}
+	return nil
+}
+
+func (hook *InfoHook) Levels() []logrus.Level {
+	return logrus.AllLevels
+}
+
+
+
 func SetupLogging(ctx context.Context, logPath, model, name, logLevel, pipelineID string) *logrus.Logger {
-	logLevel = strings.ToUpper(logLevel)
-	maxSizeMB := int64(100)
-	maxFiles := 10
+    logLevel = strings.ToUpper(logLevel)
+    maxSizeMB := int64(80)
+    maxFiles := 10
+
+    if logPath == "" {
+        logPath = "/tmp/log"
+    }
+    logDir := filepath.Join(logPath, name)
+
+    if err := os.MkdirAll(logDir, 0750); err != nil {
+        logrus.Fatalf("Failed to create log directory: %v", err)
+    }
+
+    logFileName := fmt.Sprintf("%s_%s_%s_go.log", name, pipelineID, logLevel)
+    logFilePath := filepath.Join(logDir, logFileName)
 
 
-	if logPath == "" {
-		logPath = "/tmp/log"
-	}
-	logDir := filepath.Join(logPath, name)
+    file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+    if err != nil {
+        logrus.Fatalf("Failed to open log file: %v", err)
+    }
 
-	if err := os.MkdirAll(logDir, 0750); err != nil {
-		logrus.Fatalf("Failed to create log directory: %v", err)
-	}
+    logger := logrus.New()
+    logger.SetOutput(file)
+    logger.SetFormatter(new(CustomFormatter))
+    logger.SetReportCaller(true)
 
-	logFileName := fmt.Sprintf("%s_%s_%s_go.log", name, pipelineID, logLevel)
-	logFilePath := filepath.Join(logDir, logFileName)
+    infoLogFileName := fmt.Sprintf("%s_%s_INFO_go.log", name, pipelineID)
+    infoLogFilePath := filepath.Join(logDir, infoLogFileName)
 
-	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		logrus.Fatalf("Failed to open log file: %v", err)
-	}
+    infoFile, err := os.OpenFile(infoLogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+    if err != nil {
+        logrus.Fatalf("Failed to open info log file: %v", err)
+    }
+    infoLogger := logrus.New()
+    infoLogger.Out = infoFile
+    infoLogger.Formatter = new(CustomFormatter)
+    infoLogger.Level = logrus.InfoLevel 
+    infoLogger.SetReportCaller(true)
 
-	logger := logrus.New()
-	logger.SetOutput(file)
-	logger.SetFormatter(new(CustomFormatter))
-	logger.SetReportCaller(true)
+	logger.AddHook(&InfoHook{logger: infoLogger})
 
+    setLogLevel(logger, logLevel)
+
+    go rotateLogFile(ctx, logger, logFilePath, maxSizeMB, maxFiles)
+    go rotateLogFile(ctx, infoLogger, infoLogFilePath, maxSizeMB, maxFiles)
+
+    return logger
+}
+
+
+func setLogLevel(logger *logrus.Logger, logLevel string) {
 	switch logLevel {
 	case "DEBUG":
 		logger.SetLevel(logrus.DebugLevel)
@@ -72,49 +114,8 @@ func SetupLogging(ctx context.Context, logPath, model, name, logLevel, pipelineI
 	default:
 		logger.SetLevel(logrus.InfoLevel)
 	}
-
-	go rotateLogFile(ctx, logger, logFilePath,maxSizeMB, maxFiles)
-
-
-	return logger
 }
 
-func findLatestLogFile(logDir string) string {
-	files, err := os.ReadDir(logDir)
-	if err != nil {
-		logrus.Fatalf("Failed to read log directory: %v", err)
-	}
-
-	var latestFile os.DirEntry
-	var latestIdx int
-	for _, file := range files {
-		if file.IsDir() {
-			continue
-		}
-		name := file.Name()
-		idx, err := parseLogIndex(name)
-		if err == nil && idx > latestIdx {
-			latestIdx = idx
-			latestFile = file
-		}
-	}
-	if latestFile != nil {
-		return latestFile.Name()
-	}
-	return ""
-}
-
-func parseLogIndex(fileName string) (int, error) {
-	base := filepath.Base(fileName)
-	ext := filepath.Ext(fileName)
-	base = strings.TrimSuffix(base, ext)
-	parts := strings.Split(base, "_")
-	
-	if len(parts) > 1 {
-		return strconv.Atoi(parts[len(parts)-1])
-	}
-	return 0, fmt.Errorf("log file name does not contain index")
-}
 
 func rotateLogFile(ctx context.Context, logger *logrus.Logger, logFilePath string, maxSizeMB int64, maxFiles int) {
     checkLogDuration := 1 * time.Second
@@ -123,7 +124,7 @@ func rotateLogFile(ctx context.Context, logger *logrus.Logger, logFilePath strin
 
     for {
         select {
-        case <-ctx.Done(): // 종료 신호를 받음
+        case <-ctx.Done(): 
             logger.Info("Log rotation stopped due to context cancellation")
             return
         case <-checkSizeTicker.C:
@@ -179,5 +180,6 @@ func resetFileIndexIfNecessary(currentIndex, maxIndex int) int {
 	}
 	return currentIndex + 1
 }
+
 
 
