@@ -1,56 +1,96 @@
 package util
 
 import (
-	"context"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
+    "context"
+    "fmt"
+    "io"
+    "io/ioutil"
+    "os"
+    "sync"
+    "path/filepath"
+    "strings"
+    "time"
 
-	"github.com/sirupsen/logrus"
+    logrus "github.com/sirupsen/logrus"
+)
+
+var (
+    maxSizeMB        int64  = 80
+    maxFiles         int    = 10
+    defaultLogLevel  string = "INFO"
 )
 
 
 type CustomFormatter struct{}
 
 func (f *CustomFormatter) Format(entry *logrus.Entry) ([]byte, error) {
-	timestamp := entry.Time.Format("2006-01-02 15:04:05.000000000")
-	logLevel := strings.ToUpper(entry.Level.String())
-
-	var file string
-	var line int
-
-	if entry.HasCaller() {
-		file = filepath.Base(entry.Caller.File)
-		line = entry.Caller.Line
-	}
-
-	msg := fmt.Sprintf("%s | %s | [%s:%d] %s\n", timestamp, logLevel, file, line, entry.Message)
-	return []byte(msg), nil
-}
-
-type InfoHook struct {
-	logger *logrus.Logger
-}
-
-func (hook *InfoHook) Fire(entry *logrus.Entry) error {
-	if entry.Level <= logrus.InfoLevel {
-		hook.logger.WithFields(entry.Data).Log(entry.Level, entry.Message)
-	}
-	return nil
-}
-
-func (hook *InfoHook) Levels() []logrus.Level {
-	return logrus.AllLevels
+    timestamp := entry.Time.Format("2006-01-02 15:04:05.000000000")
+    logLevel := strings.ToUpper(entry.Level.String())
+    var file string
+    var line int
+    if entry.HasCaller() {
+        file = filepath.Base(entry.Caller.File)
+        line = entry.Caller.Line
+    }
+    msg := fmt.Sprintf("%s | %s | [%s:%d] %s\n", timestamp, logLevel, file, line, entry.Message)
+    return []byte(msg), nil
 }
 
 
+func NewWriterHook(writer io.Writer, logLevels []logrus.Level, file *os.File, level logrus.Level) *WriterHook {
+    return &WriterHook{
+        Writer:    writer,
+        LogLevels: logLevels,
+        File:      file,
+        Level:     level,
+        mu:        &sync.Mutex{},
+    }
+}
 
-func SetupLogging(ctx context.Context, logPath, model, name, logLevel, pipelineID string) *logrus.Logger {
+type WriterHook struct {
+    Writer    io.Writer
+    LogLevels []logrus.Level
+    File      *os.File
+    Level    logrus.Level
+    mu        *sync.Mutex 
+}
+
+func (hook *WriterHook) Fire(entry *logrus.Entry) error {
+    hook.mu.Lock()
+    defer hook.mu.Unlock()
+
+    for _, level := range hook.LogLevels {
+        if entry.Level == level {
+            line, err := entry.String()
+            if err != nil {
+                return err
+            }
+            _, err = hook.Writer.Write([]byte(line))
+            return err
+        }
+    }
+    return nil
+}
+
+func (hook *WriterHook) Levels() []logrus.Level {
+    return hook.LogLevels
+}
+
+func (hook *WriterHook) UpdateWriter(newWriter io.Writer, newFile *os.File) {
+    hook.mu.Lock()
+    defer hook.mu.Unlock()
+
+    if hook.File != nil {
+        hook.File.Close()
+    }
+    hook.Writer = newWriter
+    hook.File = newFile
+}
+
+
+
+func SetupLogging(ctx context.Context, logPath, model, name, logLevel string) *logrus.Logger {
     logLevel = strings.ToUpper(logLevel)
-    maxSizeMB := int64(80)
-    maxFiles := 10
 
     if logPath == "" {
         logPath = "/tmp/log"
@@ -61,125 +101,111 @@ func SetupLogging(ctx context.Context, logPath, model, name, logLevel, pipelineI
         logrus.Fatalf("Failed to create log directory: %v", err)
     }
 
-    logFileName := fmt.Sprintf("%s_%s_%s_go.log", name, pipelineID, logLevel)
-    logFilePath := filepath.Join(logDir, logFileName)
-
-
-    file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-    if err != nil {
-        logrus.Fatalf("Failed to open log file: %v", err)
-    }
-
     logger := logrus.New()
-    logger.SetOutput(file)
     logger.SetFormatter(new(CustomFormatter))
     logger.SetReportCaller(true)
+    logger.Out = ioutil.Discard
+    
+    setlogLevel := setLogLevel(logLevel)
+    defaultlogLevel := setLogLevel(defaultLogLevel)
+    logger.SetLevel(setlogLevel)
 
-    infoLogFileName := fmt.Sprintf("%s_%s_INFO_go.log", name, pipelineID)
-    infoLogFilePath := filepath.Join(logDir, infoLogFileName)
+    initializeHookForLevel(logger, logDir, name, setlogLevel)
+    initializeHookForLevel(logger, logDir, name, defaultlogLevel)
 
-    infoFile, err := os.OpenFile(infoLogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-    if err != nil {
-        logrus.Fatalf("Failed to open info log file: %v", err)
-    }
-    infoLogger := logrus.New()
-    infoLogger.Out = infoFile
-    infoLogger.Formatter = new(CustomFormatter)
-    infoLogger.Level = logrus.InfoLevel 
-    infoLogger.SetReportCaller(true)
-
-	logger.AddHook(&InfoHook{logger: infoLogger})
-
-    setLogLevel(logger, logLevel)
-
-    go rotateLogFile(ctx, logger, logFilePath, maxSizeMB, maxFiles)
-    go rotateLogFile(ctx, infoLogger, infoLogFilePath, maxSizeMB, maxFiles)
+    go rotateLogFile(ctx, logger, logDir, name, maxSizeMB, maxFiles,setlogLevel)
+    go rotateLogFile(ctx, logger, logDir, name, maxSizeMB, maxFiles,defaultlogLevel)
 
     return logger
 }
 
-
-func setLogLevel(logger *logrus.Logger, logLevel string) {
-	switch logLevel {
-	case "DEBUG":
-		logger.SetLevel(logrus.DebugLevel)
-	case "INFO":
-		logger.SetLevel(logrus.InfoLevel)
-	case "WARNING":
-		logger.SetLevel(logrus.WarnLevel)
-	case "ERROR":
-		logger.SetLevel(logrus.ErrorLevel)
-	case "CRITICAL":
-		logger.SetLevel(logrus.FatalLevel)
-	default:
-		logger.SetLevel(logrus.InfoLevel)
-	}
+func setLogLevel(logLevel string) logrus.Level {
+    switch strings.ToUpper(logLevel) {
+    case "DEBUG":
+        return logrus.DebugLevel
+    case "INFO":
+        return logrus.InfoLevel
+    case "WARNING":
+        return logrus.WarnLevel
+    case "ERROR":
+        return logrus.ErrorLevel
+    case "CRITICAL":
+        return logrus.FatalLevel
+    default:
+        return logrus.InfoLevel
+    }
 }
 
 
-func rotateLogFile(ctx context.Context, logger *logrus.Logger, logFilePath string, maxSizeMB int64, maxFiles int) {
+func rotateLogFile(ctx context.Context, logger *logrus.Logger, logDir, name string, maxSizeMB int64, maxFiles int, level logrus.Level) {
     checkLogDuration := 1 * time.Second
     checkSizeTicker := time.NewTicker(checkLogDuration)
     defer checkSizeTicker.Stop()
 
     for {
         select {
-        case <-ctx.Done(): 
+        case <-ctx.Done():
             logger.Info("Log rotation stopped due to context cancellation")
             return
         case <-checkSizeTicker.C:
+            logFilePath := filepath.Join(logDir, fmt.Sprintf("%s_%s_go.log", name, strings.ToUpper(level.String())))
             fileInfo, err := os.Stat(logFilePath)
-            if err != nil {
+            if err != nil && !os.IsNotExist(err) {
                 logger.Errorf("Failed to get log file info: %v", err)
                 continue
             }
-
-            if fileInfo.Size() < maxSizeMB*1024*1024 {
-                continue
-            }
-
-            for i := maxFiles - 1; i > 0; i-- {
-                oldPath := fmt.Sprintf("%s.%d", logFilePath, i-1)
-                if i == 1 {
-                    oldPath = logFilePath
+    
+            if fileInfo != nil && fileInfo.Size() >= maxSizeMB*1024*1024 {
+                for i := maxFiles - 1; i >= 0; i-- {
+                    oldPath := fmt.Sprintf("%s.%d", logFilePath, i)
+                    newPath := fmt.Sprintf("%s.%d", logFilePath, i+1)
+                    if i == 0 {
+                        oldPath = logFilePath
+                    }
+                    if _, err := os.Stat(oldPath); err == nil {
+                        os.Rename(oldPath, newPath)
+                    }
                 }
-                newPath := fmt.Sprintf("%s.%d", logFilePath, i)
-
-                if _, err := os.Stat(oldPath); os.IsNotExist(err) {
+    
+                newFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+                if err != nil {
+                    logger.Errorf("Failed to open new log file: %v", err)
                     continue
                 }
-                os.Rename(oldPath, newPath)
+    
+                updateLevelHook(logger, level, newFile)
             }
 
-            os.Truncate(logFilePath, 0)
-            file, err := os.OpenFile(logFilePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
-            if err != nil {
-                logger.Errorf("Failed to open new log file: %v", err)
-                return
-            }
-            logger.SetOutput(file)
         }
     }
 }
 
+func initializeHookForLevel(logger *logrus.Logger, logDir, name string, level logrus.Level) {
+    levelStr := strings.ToUpper(level.String())
+    filePath := filepath.Join(logDir, fmt.Sprintf("%s_%s_go.log", name, levelStr))
+    file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+    if err != nil {
+        logrus.Fatalf("Failed to open log file: %v", err)
+    }
 
+    var levels []logrus.Level
+    for _, l := range logrus.AllLevels {
+        if l <= level {
+            levels = append(levels, l)
+        }
+    }
 
-
-func incrementLogFileName(basePath string, index int) string {
-	dir, file := filepath.Split(basePath)
-	ext := filepath.Ext(file)
-	base := strings.TrimSuffix(file, ext)
-
-	newFileName := fmt.Sprintf("%s_%d%s", base, index, ext)
-	return filepath.Join(dir, newFileName)
+    hook := NewWriterHook(file, levels, file, level)
+    logger.AddHook(hook)
 }
 
-func resetFileIndexIfNecessary(currentIndex, maxIndex int) int {
-	if currentIndex >= maxIndex {
-		return 0
-	}
-	return currentIndex + 1
+
+func updateLevelHook(logger *logrus.Logger, level logrus.Level, newFile *os.File) {
+    for _, hook := range logger.Hooks[level] {
+        if writerHook, ok := hook.(*WriterHook); ok {
+            if writerHook.Level == level { 
+                writerHook.UpdateWriter(newFile, newFile)
+            }
+        }
+    }
 }
-
-
-
