@@ -8,7 +8,7 @@ func main() {
 	messageChannel := make(chan string)
 
 	go func() {
-		messageChannel <- "Hello, World!"
+		messageChannel <- "Hello!"
 	}()
 
 	message := <-messageChannel
